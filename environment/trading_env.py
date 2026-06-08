@@ -22,53 +22,62 @@ class TradingEnv(gym.Env):
                  stop_loss: Optional[IStopLoss] = None,
                  take_profit: Optional[ITakeProfit] = None):
         super().__init__()
-        
+        # Pastikan df sudah clean
         self.df = df.sort_index().copy()
-        self.lookback = lookback_window
+        self.lookback = int(lookback_window)
         self.initial_capital = float(initial_capital)
-        self.transaction_cost_pct = transaction_cost_pct
+        self.transaction_cost_pct = float(transaction_cost_pct)
         
         self.reward_engine = reward_engine or RewardEngine()
         self.position_sizer = position_sizer or FixedFractionSizer()
         self.stop_loss = stop_loss or FixedStopLoss()
         self.take_profit = take_profit or FixedTakeProfit()
         
-        # Pastikan lookback tidak melebihi panjang data
+        # Validasi data
         if len(self.df) <= self.lookback:
-            raise ValueError(f"Data terlalu pendek ({len(self.df)} baris) untuk lookback {self.lookback}")
+            raise ValueError(f"Data terlalu pendek: {len(self.df)} baris, butuh > {self.lookback}")
         
-        # Fitur: semua kolom numerik kecuali Open, High, Low, Volume (tapi Close tetap dipakai)
+        # Fitur: semua kolom kecuali Open, High, Low, Volume
         excluded = ['Open', 'High', 'Low', 'Volume']
         self.feature_columns = [c for c in self.df.columns if c not in excluded]
         if 'Close' not in self.feature_columns:
             self.feature_columns.append('Close')
         self.feature_columns = list(set(self.feature_columns))
         
-        # Validasi kolom
-        missing = [c for c in self.feature_columns if c not in self.df.columns]
-        if missing:
-            raise KeyError(f"Kolom tidak ditemukan: {missing}")
-        
         self.num_features = len(self.feature_columns)
         obs_dim = self.lookback * self.num_features + 2
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32)
         self.action_space = spaces.Discrete(3)
         
-        # State internal
+        # State
+        self.current_step = None
+        self.max_step = None
+        self.cash = None
+        self.shares = None
+        self.entry_price = None
+        self.portfolio_history = None
+        self.returns_history = None
+        
         self.reset()
     
     def _get_obs(self) -> np.ndarray:
-        # Pastikan step dalam batas integer
+        # Pastikan integer
         current = int(self.current_step)
         start = current - self.lookback + 1
+        if start < 0:
+            start = 0
         end = current + 1
-        
-        # Ambil data dengan iloc (indeks posisi)
-        data_window = self.df.iloc[start:end][self.feature_columns].values
+        # Ambil data
+        window_df = self.df.iloc[start:end]
+        if len(window_df) < self.lookback:
+            # Jika masih kurang, padding dengan data pertama
+            pad_rows = self.lookback - len(window_df)
+            first_row = self.df.iloc[[0] * pad_rows]
+            window_df = pd.concat([first_row, window_df], axis=0)
+        data_window = window_df[self.feature_columns].values
         if data_window.shape[0] != self.lookback:
-            # Fallback jika ada masalah (misal start negatif)
+            # Fallback: ambil last lookback rows
             data_window = self.df.iloc[-self.lookback:][self.feature_columns].values
-        
         obs_flat = data_window.flatten().astype(np.float32)
         
         # Portfolio state
@@ -83,7 +92,11 @@ class TradingEnv(gym.Env):
         return obs
     
     def _current_price(self) -> float:
-        return float(self.df.iloc[int(self.current_step)]['Close'])
+        idx = int(self.current_step)
+        # Pastikan idx dalam batas
+        if idx >= len(self.df):
+            idx = len(self.df) - 1
+        return float(self.df.iloc[idx]['Close'])
     
     def _get_current_equity(self) -> float:
         return self.cash + self.shares * self._current_price()
@@ -92,9 +105,9 @@ class TradingEnv(gym.Env):
         prev_value = self._get_current_equity()
         current_price = self._current_price()
         
-        # Validasi action
+        # Eksekusi action
         action = int(action)
-        if action == 1:  # BUY
+        if action == 1:  # Buy
             if self.cash > 0:
                 max_shares = self.position_sizer.compute_size(self.cash, current_price)
                 if max_shares > 0:
@@ -103,13 +116,13 @@ class TradingEnv(gym.Env):
                         self.cash -= cost
                         self.shares += max_shares
                         self.entry_price = current_price
-        elif action == 2:  # SELL
+        elif action == 2:  # Sell
             if self.shares > 0:
                 revenue = self.shares * current_price * (1 - self.transaction_cost_pct)
                 self.cash += revenue
                 self.shares = 0
         
-        # Increment step
+        # Update step
         self.current_step += 1
         terminated = self.current_step >= self.max_step
         truncated = False
@@ -132,14 +145,15 @@ class TradingEnv(gym.Env):
     
     def reset(self, seed=None, options=None) -> Tuple[np.ndarray, Dict]:
         super().reset(seed=seed)
-        self.current_step = int(self.lookback)
+        self.current_step = self.lookback  # integer
         self.max_step = len(self.df) - 1
-        self.cash = float(self.initial_capital)
+        self.cash = self.initial_capital
         self.shares = 0
         self.entry_price = 0.0
         self.portfolio_history = [self.initial_capital]
         self.returns_history = []
-        self.reward_engine.reset()
+        if hasattr(self.reward_engine, 'reset'):
+            self.reward_engine.reset()
         obs = self._get_obs()
         info = {"portfolio_value": self.initial_capital}
         return obs, info
