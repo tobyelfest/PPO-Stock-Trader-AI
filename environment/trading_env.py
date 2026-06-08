@@ -11,9 +11,8 @@ from environment.reward_engine import RewardEngine
 
 class TradingEnv(gym.Env):
     """
-    Environment trading untuk SATU saham (single stock).
-    DataFrame input harus memiliki kolom: Open, High, Low, Close, Volume, dan indikator.
-    Index harus datetime.
+    SINGLE STOCK trading environment.
+    DataFrame harus memiliki kolom: Open, High, Low, Close, Volume, plus indikator.
     """
     metadata = {"render_modes": ["human", "none"]}
 
@@ -28,15 +27,11 @@ class TradingEnv(gym.Env):
                  take_profit: Optional[ITakeProfit] = None):
         super().__init__()
         
-        # Data: pastikan index datetime dan sudah di-reset (opsional)
         self.df = df.sort_index().copy()
         self.lookback = lookback_window
-        
-        # Parameter trading
         self.initial_capital = initial_capital
         self.transaction_cost_pct = transaction_cost_pct
         
-        # Risk management components
         self.reward_engine = reward_engine or RewardEngine()
         self.position_sizer = position_sizer or FixedFractionSizer()
         self.stop_loss = stop_loss or FixedStopLoss()
@@ -46,51 +41,35 @@ class TradingEnv(gym.Env):
         self.current_step = self.lookback
         self.max_step = len(self.df) - 1
         self.cash = self.initial_capital
-        self.shares = 0   # jumlah saham yang dipegang
+        self.shares = 0
         self.entry_price = 0.0
         self.portfolio_history = [self.initial_capital]
         self.returns_history = []
         
-        # Observation space: kita akan flatten semua fitur + portfolio state
-        # Fitur: dari df (selain kolom harga mentah? Bebas, kita ambil semua kolom numerik)
-        # Untuk sederhana, kita gunakan semua kolom yang ada di df (sudah termasuk indikator)
-        self.feature_columns = [c for c in self.df.columns if c not in ['Open', 'High', 'Low', 'Close', 'Volume']]
-        # Tambahkan Close dan Volume juga sebagai fitur
-        self.feature_columns += ['Close', 'Volume']
+        # Fitur: semua kolom kecuali Open, High, Low, Volume (tapi sertakan Close)
+        self.feature_columns = [c for c in self.df.columns if c not in ['Open', 'High', 'Low', 'Volume']]
+        if 'Close' not in self.feature_columns:
+            self.feature_columns.append('Close')
         self.feature_columns = list(set(self.feature_columns))
         self.num_features = len(self.feature_columns)
         
-        # Shape observasi: [lookback_window * num_features + portfolio_state(2)]
-        # Portfolio state: (cash_ratio, shares_ratio) -> normalized
-        obs_dim = self.lookback * self.num_features + 2
+        obs_dim = self.lookback * self.num_features + 2  # + cash_ratio & shares_ratio
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32)
-        
-        # Action: 0=hold, 1=buy (maksimal 100% cash), 2=sell (100% saham)
-        self.action_space = spaces.Discrete(3)
+        self.action_space = spaces.Discrete(3)  # 0=hold, 1=buy, 2=sell
     
     def _get_obs(self) -> np.ndarray:
-        # Ambil data lookback terakhir
         start = self.current_step - self.lookback + 1
         end = self.current_step + 1
-        data_window = self.df.iloc[start:end][self.feature_columns].values  # shape (lookback, num_features)
-        
-        # Normalisasi sederhana: bagi dengan harga Close pertama di window (untuk harga)
-        # Tapi biarkan raw dulu; nanti bisa dinormalisasi di preprocessor.
-        # Flatten
+        data_window = self.df.iloc[start:end][self.feature_columns].values
         obs_flat = data_window.flatten()
         
-        # Portfolio state (cash_ratio, shares_ratio) relative to initial capital
-        cash_ratio = self.cash / self.initial_capital
-        # Nilai saham saat ini
         current_price = self._current_price()
-        stock_value = self.shares * current_price
-        total_value = self.cash + stock_value
-        shares_ratio = stock_value / (total_value + 1e-8)
-        
+        total_value = self.cash + self.shares * current_price
+        cash_ratio = self.cash / (self.initial_capital + 1e-8)
+        shares_ratio = (self.shares * current_price) / (total_value + 1e-8)
         portfolio_state = np.array([cash_ratio, shares_ratio], dtype=np.float32)
         
         obs = np.concatenate([obs_flat, portfolio_state])
-        # Handle NaN
         obs = np.nan_to_num(obs, nan=0.0)
         return obs.astype(np.float32)
     
@@ -104,24 +83,21 @@ class TradingEnv(gym.Env):
         prev_value = self._get_current_equity()
         current_price = self._current_price()
         
-        # Eksekusi action
         if action == 1:  # BUY
             if self.cash > 0:
-                # Hitung jumlah saham yang bisa dibeli dengan seluruh cash (atau dengan position sizer)
                 max_shares = self.position_sizer.compute_size(self.cash, current_price)
                 if max_shares > 0:
                     cost = max_shares * current_price * (1 + self.transaction_cost_pct)
                     if cost <= self.cash:
                         self.cash -= cost
                         self.shares += max_shares
-                        self.entry_price = current_price  # catat harga entry untuk stop loss/take profit
+                        self.entry_price = current_price
         elif action == 2:  # SELL
             if self.shares > 0:
                 revenue = self.shares * current_price * (1 - self.transaction_cost_pct)
                 self.cash += revenue
                 self.shares = 0
         
-        # Update step
         self.current_step += 1
         terminated = self.current_step >= self.max_step
         truncated = False
@@ -135,7 +111,6 @@ class TradingEnv(gym.Env):
         
         obs = self._get_obs()
         info = {"portfolio_value": new_value, "step": self.current_step, "shares": self.shares, "cash": self.cash}
-        
         return obs, reward, terminated, truncated, info
     
     def reset(self, seed=None, options=None) -> Tuple[np.ndarray, Dict]:
