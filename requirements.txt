@@ -6,3 +6,4 @@ shimmy
 gymnasium
 scikit-learn
 ta
+python-dotenv
