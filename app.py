@@ -25,27 +25,39 @@ st.sidebar.write(f"Mulai Testing: {Config.VALIDATION_SPLIT_DATE}")
 if st.button("🚀 Jalankan Backtest Sekarang"):
     try:
         with st.status("Sedang bekerja...", expanded=True) as status:
-            # 1. Download Data
+           # 1. Download Data
             st.write("📥 Mengambil data historis...")
             loader = DataLoader()
             df_raw = loader.download_all()
             
-            # --- FIX LEVEL TICKER & MULTIINDEX ---
+            # --- AGGRESSIVE FIX UNTUK ERROR 'TICKER' ---
             df = df_raw.copy()
             
-            # Jika kolom berlapis, ambil level atas saja (Open, Close, dsb)
+            # A. Buang MultiIndex di Kolom
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
             
-            # Jika index berlapis (ada Date dan Ticker)
-            if isinstance(df.index, pd.MultiIndex):
-                # Buang semua level kecuali yang isinya tanggal (biasanya level 0 atau yang namanya 'Date')
-                df.index = df.index.get_level_values(0)
+            # B. Paksa Reset Index (Buang semua level Ticker/Date yang bikin error)
+            df = df.reset_index()
             
-            # Paksa index jadi datetime murni
-            df.index = pd.to_datetime(df.index)
-            df.index.name = 'Date' # Kita reset namanya jadi Date yang bersih
-            # -------------------------------------
+            # C. Cari kolom yang mengandung tanggal dan jadikan Index murni
+            # Biasanya namanya 'Date' atau 'index' setelah di reset_index
+            if 'Date' in df.columns:
+                df['Date'] = pd.to_datetime(df['Date'])
+                df.set_index('Date', inplace=True)
+            elif 'index' in df.columns:
+                df['index'] = pd.to_datetime(df['index'])
+                df.set_index('index', inplace=True)
+                df.index.name = 'Date'
+            
+            # D. Buang kolom 'Ticker' jika dia nyasar jadi kolom biasa
+            if 'Ticker' in df.columns:
+                df = df.drop(columns=['Ticker'])
+                
+            # E. Pastikan index bersih dari zona waktu (Timezone)
+            if df.index.tz is not None:
+                df.index = df.index.tz_localize(None)
+            # -------------------------------------------
             
             # 2. Proses Indikator
             st.write("📊 Menghitung indikator teknikal...")
