@@ -8,9 +8,6 @@ from stable_baselines3 import PPO
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from config.config import Config
-from data.loader import DataLoader
-from data.preprocessing import DataPreprocessor
-from data.splitter import DataSplitter
 from features.indicators import TechnicalIndicators
 from features.market_regime import MarketRegime
 from environment.trading_env import TradingEnv
@@ -24,73 +21,54 @@ st.title("🤖 AI Stock Trading Dashboard (PPO)")
 st.markdown("---")
 
 st.sidebar.header("📊 Informasi Bot")
-st.sidebar.info(f"**Target Saham:** {Config.STOCKS[0]}")
-st.sidebar.info(f"**Periode Testing:** {Config.VALIDATION_SPLIT_DATE} → {Config.END_DATE}")
+st.sidebar.info("**Target Saham:** BBCA.JK")
 st.sidebar.info(f"**Modal Awal:** Rp {Config.INITIAL_CAPITAL:,.0f}")
 st.sidebar.markdown("---")
 
 MODEL_PATH = "trained_ppo_model.zip"
+CSV_PATH = "BBCA.JK.csv"
 
 if st.button("🚀 Jalankan Backtest Sekarang", type="primary"):
     try:
         with st.status("⏳ Memproses data...", expanded=True) as status:
-            # 1. Load data
-            st.write("📥 Mengunduh data...")
-            loader = DataLoader()
-            df_raw = loader.download_all()
+            # 1. Baca CSV
+            st.write("📥 Membaca data BBCA.JK.csv...")
+            if not os.path.exists(CSV_PATH):
+                st.error(f"File {CSV_PATH} tidak ditemukan di repository!")
+                st.stop()
+            df = pd.read_csv(CSV_PATH)
+            df['Date'] = pd.to_datetime(df['Date'])
+            df.set_index('Date', inplace=True)
+            df.sort_index(inplace=True)
             
-            ticker = Config.STOCKS[0]
-            if isinstance(df_raw.columns, pd.MultiIndex):
-                df = df_raw.xs(ticker, level=0, axis=1).copy()
-            else:
-                df = df_raw.copy()
-            
-            # Pastikan kolom yang diperlukan ada
             required = ['Open', 'High', 'Low', 'Close', 'Volume']
             if not all(c in df.columns for c in required):
                 st.error(f"Kolom tidak lengkap: {df.columns.tolist()}")
                 st.stop()
             
-            if 'Date' in df.columns:
-                df['Date'] = pd.to_datetime(df['Date'])
-                df.set_index('Date', inplace=True)
-            df.index = pd.to_datetime(df.index)
-            
-            # 2. Indikator
-            st.write("📊 Menghitung indikator...")
+            # 2. Hitung indikator
+            st.write("📊 Menghitung indikator teknikal...")
             df = TechnicalIndicators.compute_all(df)
             df = MarketRegime.add_regime_features(df)
             df = df.dropna()
             
-            # 3. Split data
-            st.write("✂️ Split data...")
-            splitter = DataSplitter()
-            train_df, val_df, test_df = splitter.split_by_date(df, Config.VALIDATION_SPLIT_DATE, Config.END_DATE)
-            
+            # 3. Siapkan data testing (semua data setelah preprocessing)
+            test_df = df.copy()
             if test_df.empty:
-                st.error("Data testing kosong!")
+                st.error("Data kosong setelah preprocessing!")
                 st.stop()
             
-            # 4. Normalisasi fitur (opsional)
-            feature_cols = [c for c in Config.INDICATORS if c in test_df.columns] + ['Close', 'Volume', 'regime', 'volatility_20d']
-            feature_cols = list(set([c for c in feature_cols if c in test_df.columns]))
-            preprocessor = DataPreprocessor(features=feature_cols, lookback=Config.LOOKBACK_WINDOW)
-            preprocessor.fit(train_df[feature_cols])
-            test_df_norm = preprocessor.transform(test_df[feature_cols])
-            for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
-                test_df_norm[col] = test_df[col]
-            
-            # 5. Load model
-            st.write("🧠 Load model PPO...")
+            # 4. Load model
+            st.write("🧠 Memuat model PPO...")
             if not os.path.exists(MODEL_PATH):
                 st.error(f"Model {MODEL_PATH} tidak ditemukan!")
                 st.stop()
             model = PPO.load(MODEL_PATH)
             
-            # 6. Setup environment (single stock)
+            # 5. Environment
             st.write("🏃 Simulasi trading...")
             env = TradingEnv(
-                df=test_df_norm,
+                df=test_df,
                 initial_capital=Config.INITIAL_CAPITAL,
                 transaction_cost_pct=Config.TRANSACTION_COST_PCT,
                 lookback_window=Config.LOOKBACK_WINDOW,
@@ -99,7 +77,7 @@ if st.button("🚀 Jalankan Backtest Sekarang", type="primary"):
                 take_profit=FixedTakeProfit(ratio=2.0)
             )
             
-            # 7. Run episode
+            # 6. Run episode
             obs, info = env.reset()
             done = False
             portfolio_values = [info["portfolio_value"]]
@@ -113,7 +91,7 @@ if st.button("🚀 Jalankan Backtest Sekarang", type="primary"):
             
             status.update(label="✅ Selesai!", state="complete", expanded=False)
         
-        # 8. Tampilkan hasil
+        # Tampilkan hasil
         st.success("Backtest berhasil!")
         equity = pd.Series(portfolio_values)
         ret = (equity.iloc[-1] - equity.iloc[0]) / equity.iloc[0] * 100
@@ -130,11 +108,15 @@ if st.button("🚀 Jalankan Backtest Sekarang", type="primary"):
         st.subheader("Kurva Portfolio")
         st.line_chart(equity)
         
-        # Distribusi aksi
-        action_counts = pd.Series(actions).value_counts()
-        st.subheader("Distribusi Aksi (0=Hold, 1=Buy, 2=Sell)")
-        st.bar_chart(action_counts)
+        if actions:
+            st.subheader("Distribusi Aksi")
+            st.bar_chart(pd.Series(actions).value_counts().sort_index())
+        
+        # Download
+        results = pd.DataFrame({"step": range(len(portfolio_values)), "portfolio_value": portfolio_values})
+        csv = results.to_csv(index=False).encode('utf-8')
+        st.download_button("💾 Download CSV", csv, "backtest_results.csv", "text/csv")
         
     except Exception as e:
         st.error(f"❌ Terjadi kesalahan: {e}")
-        st.info("Periksa kembali struktur folder dan file model.")
+        st.info("Periksa kembali file model dan pastikan semua file sudah di-upload.")
