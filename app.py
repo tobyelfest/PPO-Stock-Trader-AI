@@ -29,10 +29,16 @@ st.sidebar.write(f"Mulai Testing: {Config.VALIDATION_SPLIT_DATE}")
 if st.button("🚀 Jalankan Backtest Sekarang"):
     try:
         with st.status("Sedang bekerja...", expanded=True) as status:
-            # Step 1: Ambil Data
+           # 1. Download Data
             st.write("📥 Mengambil data historis...")
             loader = DataLoader()
-            df = loader.download_all()
+            df_raw = loader.download_all()
+            
+            if isinstance(df_raw.columns, pd.MultiIndex):
+                df_raw.columns = df_raw.columns.get_level_values(0)
+            
+            # Pastikan data tidak duplikat dan rata
+            df = df_raw.copy()
             
             # Step 2: Proses Indikator
             st.write("📊 Menghitung indikator teknikal...")
