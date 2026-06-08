@@ -51,7 +51,9 @@ if st.button("🚀 Jalankan Backtest Sekarang", type="primary"):
             df = TechnicalIndicators.compute_all(df)
             df = MarketRegime.add_regime_features(df)
             df = df.dropna()
-            
+            if len(df) < Config.LOOKBACK_WINDOW + 10:
+                st.error(f"Data terlalu sedikit ({len(df)} baris) setelah preprocessing. Kurangi LOOKBACK_WINDOW atau gunakan data lebih panjang.")
+                st.stop()
             # 3. Siapkan data testing (semua data setelah preprocessing)
             test_df = df.copy()
             if test_df.empty:
