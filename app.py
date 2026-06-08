@@ -29,16 +29,28 @@ st.sidebar.write(f"Mulai Testing: {Config.VALIDATION_SPLIT_DATE}")
 if st.button("🚀 Jalankan Backtest Sekarang"):
     try:
         with st.status("Sedang bekerja...", expanded=True) as status:
-           # 1. Download Data
+            # 1. Download Data
             st.write("📥 Mengambil data historis...")
             loader = DataLoader()
             df_raw = loader.download_all()
             
-            if isinstance(df_raw.columns, pd.MultiIndex):
-                df_raw.columns = df_raw.columns.get_level_values(0)
-            
-            # Pastikan data tidak duplikat dan rata
+            # --- SUPER FIX: PERBAIKAN FORMAT INDEKS & KOLOM DATA YFINANCE ---
             df = df_raw.copy()
+            
+            # A. Ratakan Kolom yang Berlapis (MultiIndex Columns)
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+                
+            # B. Ratakan Indeks Baris jika Terbaca sebagai Tuple atau MultiIndex
+            if isinstance(df.index, pd.MultiIndex):
+                df.index = df.index.get_level_values(0)
+            elif len(df.index) > 0 and isinstance(df.index[0], tuple):
+                df.index = pd.to_datetime([x[0] for x in df.index])
+            
+            # C. Paksa Indeks Menjadi Datetime Murni & Bersihkan Nama Indeks
+            df.index = pd.to_datetime(df.index)
+            df.index.name = 'Date'
+            # -----------------------------------------------------------------
             
             # Step 2: Proses Indikator
             st.write("📊 Menghitung indikator teknikal...")
@@ -47,6 +59,13 @@ if st.button("🚀 Jalankan Backtest Sekarang"):
             
             # Step 3: Filter Data untuk Testing
             test_start = pd.to_datetime(Config.VALIDATION_SPLIT_DATE)
+            
+            # Pastikan zona waktu (timezone) disamakan agar tidak bentrok saat filter tanggal
+            if df.index.tz is not None:
+                df.index = df.index.tz_localize(None)
+            if test_start.tz is not None:
+                test_start = test_start.tz_localize(None)
+                
             test_df = df[df.index >= test_start].copy()
             
             if test_df.empty:
@@ -96,4 +115,4 @@ if st.button("🚀 Jalankan Backtest Sekarang"):
         
     except Exception as e:
         st.error(f"Waduh, ada masalah teknis: {e}")
-        st.info("Pastikan folder 'data', 'config', 'environment', dan 'features' sudah terupload.")
+        st.info("Pastikan folder 'data', 'config', 'environment', 'features', dan 'risk_management' sudah terupload dengan benar.")
